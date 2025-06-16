@@ -1,0 +1,19 @@
+{
+  "manifest_version": 2,
+  "name": "TrailblazerAssist",
+  "version": "1.0",
+
+  "description": "Help solve Trailblazer quizes.",
+
+  "icons": {
+    "48": "icons/border-48.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://trailhead.salesforce.com/content/learn/modules/*"],
+      "js": ["dist/index.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": ["storage", "https://api.openai.com/*"]
+}
