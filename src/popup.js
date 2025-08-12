@@ -1,10 +1,12 @@
 class PopupManager {
     constructor() {
-        this.settings = { keywords: [], subreddits: [], enabled: true };
+        this.settings = { keywords: [], subreddits: [], enabled: true, minAccountAge: 12, apiPaused: false };
         this.counters = { totalRemoved: 0, dailyRemoved: 0, lastResetDate: new Date().toDateString() };
         this.filteredKeywords = [];
         this.filteredSubreddits = [];
         this.currentTab = 'keywords';
+        this.rateLimitInfo = { remaining: 100, reset: Date.now() + 600000 };
+        this.rateLimitTimer = null;
         this.init();
     }
 
@@ -42,6 +44,14 @@ class PopupManager {
         document.getElementById('enableFilter').checked = this.settings.enabled;
         this.filteredKeywords = [...this.settings.keywords];
         this.filteredSubreddits = [...this.settings.subreddits];
+        
+        // Initialize age filter slider
+        const ageSlider = document.getElementById('ageSlider');
+        ageSlider.value = this.settings.minAccountAge || 12;
+        this.updateAgeDisplay(this.settings.minAccountAge || 12);
+        
+        // Initialize API status
+        this.updateApiStatus();
     }
 
     async loadCounters() {
@@ -155,8 +165,20 @@ class PopupManager {
                 this.addSubreddit();
             }
         });
+        
+        // Age filter slider
+        document.getElementById('ageSlider').addEventListener('input', (e) => {
+            const value = parseInt(e.target.value);
+            this.settings.minAccountAge = value;
+            this.updateAgeDisplay(value);
+            this.saveSettings();
+        });
+        
+        // API pause button
+        document.getElementById('pauseBtn').addEventListener('click', () => {
+            this.toggleApiPause();
+        });
 
-        // Listen for counter updates from content script
         // Listen for counter updates from content script
         if (typeof browser !== 'undefined' && browser.runtime) {
             browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -164,6 +186,9 @@ class PopupManager {
                     this.counters = message.counters;
                     this.updateCounterDisplay();
                     // Send acknowledgment
+                    sendResponse({ received: true });
+                } else if (message.type === 'rateLimitUpdate') {
+                    this.updateRateLimitInfo(message.remaining, message.reset);
                     sendResponse({ received: true });
                 }
                 // Return true to indicate we'll send a response asynchronously (even though we're doing it synchronously)
@@ -173,6 +198,9 @@ class PopupManager {
 
         // Refresh counters on popup open
         this.refreshCounters();
+        
+        // Start rate limit countdown if needed
+        this.startRateLimitTimer();
     }
 
     async refreshCounters() {
@@ -338,6 +366,98 @@ class PopupManager {
     updateAllStats() {
         this.updateKeywordStats();
         this.updateSubredditStats();
+    }
+    
+    // Age filter methods
+    updateAgeDisplay(months) {
+        const ageValue = document.getElementById('ageValue');
+        if (months < 12) {
+            ageValue.textContent = `${months} month${months === 1 ? '' : 's'}`;
+        } else {
+            const years = Math.floor(months / 12);
+            const remainingMonths = months % 12;
+            if (remainingMonths === 0) {
+                ageValue.textContent = `${years} year${years === 1 ? '' : 's'}`;
+            } else {
+                ageValue.textContent = `${years}y ${remainingMonths}m`;
+            }
+        }
+    }
+    
+    // API status and rate limiting methods
+    updateApiStatus() {
+        const indicator = document.getElementById('apiIndicator');
+        const statusText = document.getElementById('apiStatusText');
+        const pauseBtn = document.getElementById('pauseBtn');
+        
+        if (this.settings.apiPaused) {
+            indicator.className = 'api-indicator paused';
+            statusText.textContent = 'API Paused';
+            pauseBtn.textContent = 'Resume';
+            pauseBtn.classList.add('active');
+        } else if (this.rateLimitInfo.remaining <= 10) {
+            indicator.className = 'api-indicator limited';
+            statusText.textContent = 'Rate Limited';
+            pauseBtn.textContent = 'Pause';
+            pauseBtn.classList.remove('active');
+        } else {
+            indicator.className = 'api-indicator';
+            statusText.textContent = 'API Ready';
+            pauseBtn.textContent = 'Pause';
+            pauseBtn.classList.remove('active');
+        }
+    }
+    
+    toggleApiPause() {
+        this.settings.apiPaused = !this.settings.apiPaused;
+        this.updateApiStatus();
+        this.saveSettings();
+        
+        // Notify content script
+        this.notifyContentScript({ type: 'apiPauseToggled', paused: this.settings.apiPaused });
+    }
+    
+    updateRateLimitInfo(remaining, reset) {
+        this.rateLimitInfo.remaining = remaining;
+        this.rateLimitInfo.reset = reset;
+        
+        const rateLimitInfo = document.getElementById('rateLimitInfo');
+        if (remaining <= 50) {
+            const resetTime = new Date(reset);
+            const now = new Date();
+            const minutesLeft = Math.ceil((resetTime - now) / 60000);
+            rateLimitInfo.textContent = `${remaining} left (${minutesLeft}m)`;
+        } else {
+            rateLimitInfo.textContent = '';
+        }
+        
+        this.updateApiStatus();
+    }
+    
+    startRateLimitTimer() {
+        if (this.rateLimitTimer) {
+            clearInterval(this.rateLimitTimer);
+        }
+        
+        this.rateLimitTimer = setInterval(() => {
+            const now = Date.now();
+            if (now < this.rateLimitInfo.reset && this.rateLimitInfo.remaining <= 50) {
+                const minutesLeft = Math.ceil((this.rateLimitInfo.reset - now) / 60000);
+                const rateLimitInfo = document.getElementById('rateLimitInfo');
+                rateLimitInfo.textContent = `${this.rateLimitInfo.remaining} left (${minutesLeft}m)`;
+            }
+        }, 30000); // Update every 30 seconds
+    }
+    
+    async notifyContentScript(message) {
+        try {
+            const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+            if (tabs[0]) {
+                await browser.tabs.sendMessage(tabs[0].id, message);
+            }
+        } catch (error) {
+            // Silently ignore if content script not available
+        }
     }
 }
 
