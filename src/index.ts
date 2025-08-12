@@ -405,7 +405,8 @@ class Filter {
             browser.runtime.sendMessage({
                 type: 'rateLimitUpdate',
                 remaining: this.rateLimitInfo.remaining,
-                reset: this.rateLimitInfo.reset
+                reset: this.rateLimitInfo.reset,
+                used: this.rateLimitInfo.used
             }).catch(() => {
                 // Ignore errors - popup might not be open
             });
