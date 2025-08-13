@@ -48,7 +48,7 @@ class Filter {
         minAccountAge: 12, // default 1 year
         apiPaused: false
     };
-    private rateLimitInfo: RateLimitInfo = { remaining: 100, reset: Date.now() + 600000, used: 0 };
+    private rateLimitInfo: RateLimitInfo = { remaining: 500, reset: Date.now() + 600000, used: 0 };
     private userAgeCache: UserAgeCache = {};
     private pendingRequests = new Set<string>();
     private counters: CounterData = {
@@ -57,6 +57,8 @@ class Filter {
         lastResetDate: new Date().toDateString()
     };
     private observer: MutationObserver | null = null;
+    private periodicTimer: any = null;
+    private lastPostCount = 0;
 
     // Add this public getter method
     public getCounters(): CounterData {
@@ -67,8 +69,9 @@ class Filter {
         await this.loadSettings();
         await this.loadCounters();
         if (this.settings.enabled) {
-            await this.removePosts();
+            this.removePosts();
             this.setupObserver();
+            this.setupPeriodicCheck();
         }
     }
 
@@ -139,41 +142,156 @@ class Filter {
         this.counters.dailyRemoved++;
         await this.saveCounters();
     }
+    
+    private incrementCountersSync(): void {
+        this.counters.totalRemoved++;
+        this.counters.dailyRemoved++;
+        // Save asynchronously without blocking
+        this.saveCounters().catch(error => {
+            console.error('Failed to save counters:', error);
+        });
+    }
+    
+    private async processAgeChecks(posts: Element[]): Promise<void> {
+        console.log(`👥 Processing age checks for ${posts.length} posts`);
+        
+        for (const post of posts) {
+            const shredditPost = post.tagName === 'SHREDDIT-POST' ? post : post.querySelector('shreddit-post');
+            if (!shredditPost) continue;
+            
+            const author = shredditPost.getAttribute('author');
+            if (!author) continue;
+            
+            console.log(`👤 Checking age for user: ${author} (remaining: ${this.rateLimitInfo.remaining})`);
+            const ageCheckStart = performance.now();
+            
+            try {
+                const createdAt = await this.fetchUserProfile(author);
+                const ageCheckEnd = performance.now();
+                console.log(`⏱️ Age check took ${(ageCheckEnd - ageCheckStart).toFixed(2)}ms for ${author}`);
+                
+                if (createdAt && this.isAccountTooYoung(createdAt)) {
+                    const ageInMonths = (Date.now() - createdAt.getTime()) / (1000 * 60 * 60 * 24 * 30.44);
+                    const reason = `account too young: ${author} (${ageInMonths.toFixed(1)} months old, minimum: ${this.settings.minAccountAge})`;
+                    
+                    const postTitle = shredditPost.getAttribute('post-title') || '';
+                    const permalink = shredditPost.getAttribute('permalink');
+                    const postUrl = permalink ? `https://www.reddit.com${permalink}` : '';
+                    
+                    console.group('🛡️ FILTERED POST (Age)');
+                    console.log(`📝 Title: "${postTitle}"`);
+                    console.log(`🎯 Reason: ${reason}`);
+                    if (postUrl) {
+                        console.log(`🔗 URL: ${postUrl}`);
+                    }
+                    console.log(`⏰ Time: ${new Date().toLocaleTimeString()}`);
+                    console.groupEnd();
+
+                    // Remove the post
+                    const articleParent = post.closest('article');
+                    const elementToRemove = articleParent || post;
+                    elementToRemove.remove();
+
+                    // Increment counters
+                    this.incrementCountersSync();
+                }
+            } catch (error) {
+                console.error(`❌ Error checking age for user ${author}:`, error);
+            }
+        }
+    }
 
     private setupObserver(): void {
+        console.log('🔍 Setting up MutationObserver with debouncing');
+        
+        let debounceTimer: any = null;
+        
         this.observer = new MutationObserver((mutations) => {
-            let shouldCheck = false;
-            mutations.forEach((mutation) => {
-                mutation.addedNodes.forEach((node) => {
-                    if (node.nodeType === Node.ELEMENT_NODE) {
-                        const element = node as Element;
-                        if (element.tagName === 'ARTICLE' ||
-                            element.tagName === 'SHREDDIT-POST' ||
-                            element.querySelector('article') ||
-                            element.querySelector('shreddit-post')) {
-                            shouldCheck = true;
-                        }
-                    }
-                });
-            });
-
-            if (shouldCheck) {
-                this.removePosts().catch(error => {
-                    console.error('Error in removePosts:', error);
-                });
+            // Clear existing timer
+            if (debounceTimer) {
+                clearTimeout(debounceTimer);
             }
+            
+            // Debounce the processing to avoid excessive calls
+            debounceTimer = setTimeout(() => {
+                const startTime = performance.now();
+                let shouldCheck = false;
+                let newPostCount = 0;
+                
+                mutations.forEach((mutation) => {
+                    mutation.addedNodes.forEach((node) => {
+                        if (node.nodeType === Node.ELEMENT_NODE) {
+                            const element = node as Element;
+                            if (element.tagName === 'ARTICLE' ||
+                                element.tagName === 'SHREDDIT-POST' ||
+                                element.querySelector('article') ||
+                                element.querySelector('shreddit-post')) {
+                                shouldCheck = true;
+                                newPostCount++;
+                            }
+                        }
+                    });
+                });
+
+                if (shouldCheck) {
+                    console.log(`🔄 Processing ${newPostCount} new posts, starting filter...`);
+                    const filterStartTime = performance.now();
+                    
+                    // Use setTimeout to defer processing and immediately return control
+                    setTimeout(() => {
+                        this.removePosts();
+                        const filterEndTime = performance.now();
+                        const totalTime = filterEndTime - startTime;
+                        const filterTime = filterEndTime - filterStartTime;
+                        console.log(`✅ Filter completed in ${filterTime.toFixed(2)}ms (total: ${totalTime.toFixed(2)}ms)`);
+                    }, 0);
+                }
+            }, 100); // 100ms debounce
         });
 
-        this.observer.observe(document.body, {
+        // Try to find more specific containers to reduce interference
+        const feedContainer = document.querySelector('#main-content, [data-testid="post-container"], .Post') || document.body;
+        console.log(`👁️ Observing container:`, feedContainer.tagName, feedContainer.className);
+        
+        this.observer.observe(feedContainer, {
             childList: true,
             subtree: true
         });
+        console.log('👁️ MutationObserver started with debouncing');
     }
 
-    private async removePosts(): Promise<void> {
-        const posts = document.querySelectorAll('article[aria-label], shreddit-post');
+    private setupPeriodicCheck(): void {
+        console.log('⏰ Setting up periodic post check');
+        
+        this.periodicTimer = setInterval(() => {
+            const currentPostCount = document.querySelectorAll('article[aria-label], shreddit-post').length;
+            
+            if (currentPostCount > this.lastPostCount) {
+                console.log(`📈 Periodic check: ${currentPostCount - this.lastPostCount} new posts detected (${this.lastPostCount} → ${currentPostCount})`);
+                this.lastPostCount = currentPostCount;
+                
+                // Process new posts
+                setTimeout(() => {
+                    this.removePosts();
+                }, 0);
+            }
+        }, 2000); // Check every 2 seconds
+        
+        // Initialize the count
+        this.lastPostCount = document.querySelectorAll('article[aria-label], shreddit-post').length;
+        console.log(`⏰ Periodic check started, initial post count: ${this.lastPostCount}`);
+    }
 
-        for (const post of posts) {
+    private removePosts(): void {
+        const posts = document.querySelectorAll('article[aria-label], shreddit-post');
+        console.log(`🎯 Found ${posts.length} total posts to analyze`);
+
+        // First pass: Remove posts based on keywords/subreddits (synchronous, fast)
+        const postsToAgeCheck: Element[] = [];
+        
+        for (let i = 0; i < posts.length; i++) {
+            const post = posts[i];
+            
             let shouldRemove = false;
             let reason = '';
             let matchedKeyword = '';
@@ -225,25 +343,17 @@ class Filter {
                 }
             }
 
-            // If not filtered by keywords/subreddits, check user age (only for posts that would otherwise pass)
-            if (!shouldRemove && shredditPost) {
+            // If not removed by keywords/subreddits, add to age check queue
+            if (!shouldRemove && shredditPost && !this.settings.apiPaused) {
                 const author = shredditPost.getAttribute('author');
-                if (author) {
-                    try {
-                        const createdAt = await this.fetchUserProfile(author);
-                        if (createdAt && this.isAccountTooYoung(createdAt)) {
-                            shouldRemove = true;
-                            const ageInMonths = (Date.now() - createdAt.getTime()) / (1000 * 60 * 60 * 24 * 30.44);
-                            reason = `account too young: ${author} (${ageInMonths.toFixed(1)} months old, minimum: ${this.settings.minAccountAge})`;
-                        }
-                    } catch (error) {
-                        console.error(`Error checking age for user ${author}:`, error);
-                    }
+                if (author && this.rateLimitInfo.remaining > 20) {
+                    postsToAgeCheck.push(post);
                 }
             }
 
+            // Remove posts that match keywords/subreddits immediately (synchronous)
             if (shouldRemove) {
-                console.group('🛡️ FILTERED POST');
+                console.group('🛡️ FILTERED POST (Keywords/Subreddit)');
                 console.log(`📝 Title: "${postTitle}"`);
                 console.log(`🎯 Reason: ${reason}`);
                 if (postUrl) {
@@ -257,9 +367,17 @@ class Filter {
                 const elementToRemove = articleParent || post;
                 elementToRemove.remove();
 
-                // Increment counters
-                this.incrementCounters();
+                // Increment counters (synchronous)
+                this.incrementCountersSync();
             }
+        }
+        
+        // Second pass: Check ages asynchronously without blocking
+        if (postsToAgeCheck.length > 0) {
+            console.log(`🕐 Scheduling age checks for ${postsToAgeCheck.length} posts`);
+            setTimeout(() => {
+                this.processAgeChecks(postsToAgeCheck);
+            }, 0);
         }
     }
 
@@ -297,8 +415,8 @@ class Filter {
             return null;
         }
 
-        // Check rate limits
-        if (this.rateLimitInfo.remaining <= 5) {
+        // Check rate limits - be more conservative with a higher threshold
+        if (this.rateLimitInfo.remaining <= 20) {
             console.log(`⚠️ Rate limit low (${this.rateLimitInfo.remaining}), skipping age check for user: ${username}`);
             return null;
         }
@@ -393,7 +511,7 @@ class Filter {
             this.rateLimitInfo.remaining = parseInt(remaining, 10);
         }
         if (reset) {
-            // Reset is in seconds, convert to timestamp
+            // Reset is in seconds from now, convert to timestamp
             this.rateLimitInfo.reset = Date.now() + (parseInt(reset, 10) * 1000);
         }
         if (used) {
@@ -401,17 +519,20 @@ class Filter {
         }
 
         // Notify popup of rate limit update
+        console.log(`📡 Sending rate limit update: ${this.rateLimitInfo.remaining}/${this.rateLimitInfo.remaining + this.rateLimitInfo.used}`);
         try {
             browser.runtime.sendMessage({
                 type: 'rateLimitUpdate',
                 remaining: this.rateLimitInfo.remaining,
                 reset: this.rateLimitInfo.reset,
                 used: this.rateLimitInfo.used
-            }).catch(() => {
-                // Ignore errors - popup might not be open
+            }).then(() => {
+                console.log(`✅ Rate limit message sent successfully`);
+            }).catch((error) => {
+                console.log(`❌ Rate limit message failed:`, error);
             });
         } catch (error) {
-            // Ignore errors
+            console.log(`❌ Rate limit message error:`, error);
         }
     }
 
@@ -426,6 +547,11 @@ class Filter {
             this.observer.disconnect();
             this.observer = null;
         }
+        if (this.periodicTimer) {
+            clearInterval(this.periodicTimer);
+            this.periodicTimer = null;
+        }
+        console.log('🛑 Filter destroyed, timers cleared');
     }
 }
 

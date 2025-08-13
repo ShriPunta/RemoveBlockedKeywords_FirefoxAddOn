@@ -5,7 +5,7 @@ class PopupManager {
         this.filteredKeywords = [];
         this.filteredSubreddits = [];
         this.currentTab = 'keywords';
-        this.rateLimitInfo = { remaining: 100, reset: Date.now() + 600000, used: 0 };
+        this.rateLimitInfo = { remaining: 500, reset: Date.now() + 600000, used: 0 };
         this.rateLimitTimer = null;
         this.isApiDetailsExpanded = false;
         this.init();
@@ -199,6 +199,7 @@ class PopupManager {
                     // Send acknowledgment
                     sendResponse({ received: true });
                 } else if (message.type === 'rateLimitUpdate') {
+                    console.log(`📨 Popup received rate limit update:`, message);
                     this.updateRateLimitInfo(message.remaining, message.reset, message.used);
                     sendResponse({ received: true });
                 }
@@ -406,7 +407,7 @@ class PopupManager {
             statusText.textContent = 'API Paused';
             pauseBtn.textContent = 'Resume';
             pauseBtn.classList.add('active');
-        } else if (this.rateLimitInfo.remaining <= 10) {
+        } else if (this.rateLimitInfo.remaining <= 50) {
             indicator.className = 'api-indicator limited';
             statusText.textContent = 'Rate Limited';
             pauseBtn.textContent = 'Pause';
@@ -429,6 +430,7 @@ class PopupManager {
     }
     
     updateRateLimitInfo(remaining, reset, used = null) {
+        console.log(`🔄 Updating popup rate limit info: ${remaining}/${remaining + (used || 0)} (was: ${this.rateLimitInfo.remaining})`);
         this.rateLimitInfo.remaining = remaining;
         this.rateLimitInfo.reset = reset;
         if (used !== null) {
@@ -436,7 +438,8 @@ class PopupManager {
         }
         
         const rateLimitInfo = document.getElementById('rateLimitInfo');
-        if (remaining <= 50) {
+        // Only show rate limit info if we have real data and it's low
+        if (remaining !== 500 && remaining <= 100) {
             const resetTime = new Date(reset);
             const now = new Date();
             const minutesLeft = Math.ceil((resetTime - now) / 60000);
@@ -458,15 +461,15 @@ class PopupManager {
         this.rateLimitTimer = setInterval(() => {
             const now = Date.now();
             if (now < this.rateLimitInfo.reset) {
-                // Update the main rate limit info
-                if (this.rateLimitInfo.remaining <= 50) {
+                // Only update if we have actual data from content script (not initial constructor values)
+                if (this.rateLimitInfo.remaining !== 500 && this.rateLimitInfo.remaining <= 100) {
                     const minutesLeft = Math.ceil((this.rateLimitInfo.reset - now) / 60000);
                     const rateLimitInfo = document.getElementById('rateLimitInfo');
                     rateLimitInfo.textContent = `${this.rateLimitInfo.remaining} left (${minutesLeft}m)`;
                 }
                 
-                // Update detailed displays if expanded
-                if (this.isApiDetailsExpanded) {
+                // Update detailed displays if expanded and we have real data
+                if (this.isApiDetailsExpanded && this.rateLimitInfo.remaining !== 500) {
                     this.updateCooldownDisplay();
                     this.updateRateLimitDisplay();
                 }
@@ -495,19 +498,19 @@ class PopupManager {
         const rateLimitFill = document.getElementById('rateLimitFill');
         const rateLimitLabel = document.getElementById('rateLimitLabel');
         
-        const total = 100; // Reddit's rate limit
         const remaining = this.rateLimitInfo.remaining;
-        const used = this.rateLimitInfo.used || (total - remaining);
-        const percentage = (remaining / total) * 100;
+        const used = this.rateLimitInfo.used || 0;
+        const total = remaining + used; // Calculate total dynamically
+        const percentage = total > 0 ? (remaining / total) * 100 : 0;
         
         rateLimitValues.textContent = `${remaining}/${total}`;
-        rateLimitFill.style.width = `${percentage}%`;
+        rateLimitFill.style.width = `${Math.max(percentage, 1)}%`; // Minimum 1% for visibility
         
-        // Update color based on remaining requests
+        // Update color based on remaining requests (absolute values for Reddit's higher limits)
         rateLimitFill.className = 'progress-fill';
-        if (percentage <= 10) {
+        if (remaining <= 50) {
             rateLimitFill.classList.add('danger');
-        } else if (percentage <= 25) {
+        } else if (remaining <= 100) {
             rateLimitFill.classList.add('warning');
         }
         
