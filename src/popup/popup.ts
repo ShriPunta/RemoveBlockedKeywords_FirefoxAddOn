@@ -5,6 +5,7 @@ interface FilterSettings {
     keywords: string[];
     subreddits: string[];
     enabled: boolean;
+    minAccountAge: number;
 }
 
 interface FilterCounters {
@@ -16,6 +17,10 @@ interface FilterCounters {
 interface Message {
     type: string;
     counters?: FilterCounters;
+    paused?: boolean;
+    remaining?: number;
+    reset?: number;
+    used?: number;
 }
 
 class PopupManager {
@@ -74,6 +79,13 @@ class PopupManager {
         }
         this.filteredKeywords = [...this.settings.keywords];
         this.filteredSubreddits = [...this.settings.subreddits];
+
+        // Initialize age filter slider
+        const ageSlider = document.getElementById('ageSlider') as HTMLInputElement;
+        if (ageSlider) {
+            ageSlider.value = String(this.settings.minAccountAge || 12);
+            this.updateAgeDisplay(this.settings.minAccountAge || 12);
+        }
     }
 
     async loadCounters(): Promise<void> {
@@ -216,6 +228,19 @@ class PopupManager {
             });
         }
 
+        // Age filter slider
+        const ageSlider = document.getElementById('ageSlider') as HTMLInputElement;
+        if (ageSlider) {
+            ageSlider.addEventListener('input', (e) => {
+                const target = e.target as HTMLInputElement;
+                const value = parseInt(target.value);
+                this.settings.minAccountAge = value;
+                this.updateAgeDisplay(value);
+                this.saveSettings();
+            });
+        }
+
+
         // Listen for counter updates from content script
         if (typeof browser !== 'undefined' && browser.runtime) {
             browser.runtime.onMessage.addListener((message: Message, sender, sendResponse) => {
@@ -251,7 +276,7 @@ class PopupManager {
     renderKeywords(): void {
         const container = document.getElementById('keywordsContainer');
         if (!container) return;
-        
+
         container.innerHTML = '';
 
         if (this.filteredKeywords.length === 0) {
@@ -286,7 +311,7 @@ class PopupManager {
     addKeyword(): void {
         const input = document.getElementById('keywordAddInput') as HTMLInputElement;
         if (!input) return;
-        
+
         const keyword = input.value.trim().toLowerCase();
 
         if (keyword && !this.settings.keywords.includes(keyword)) {
@@ -335,7 +360,7 @@ class PopupManager {
     renderSubreddits(): void {
         const container = document.getElementById('subredditsContainer');
         if (!container) return;
-        
+
         container.innerHTML = '';
 
         if (this.filteredSubreddits.length === 0) {
@@ -370,7 +395,7 @@ class PopupManager {
     addSubreddit(): void {
         const input = document.getElementById('subredditAddInput') as HTMLInputElement;
         if (!input) return;
-        
+
         let subreddit = input.value.trim().toLowerCase();
 
         // Add r/ prefix if not present
@@ -421,6 +446,48 @@ class PopupManager {
     updateAllStats(): void {
         this.updateKeywordStats();
         this.updateSubredditStats();
+    }
+
+    // Age filter methods
+    updateAgeDisplay(months: number): void {
+        const ageValue = document.getElementById('ageValue');
+        if (!ageValue) return;
+        if (months < 12) {
+            ageValue.textContent = `${months} month${months === 1 ? '' : 's'}`;
+        } else {
+            const years = Math.floor(months / 12);
+            const remainingMonths = months % 12;
+            if (remainingMonths === 0) {
+                ageValue.textContent = `${years} year${years === 1 ? '' : 's'}`;
+            } else {
+                ageValue.textContent = `${years}y ${remainingMonths}m`;
+            }
+        }
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    async notifyContentScript(message: any): Promise<void> {
+        try {
+            const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+            if (tabs[0] && tabs[0].id) {
+                await browser.tabs.sendMessage(tabs[0].id, message);
+            }
+        } catch (error) {
+            // Silently ignore if content script not available
+        }
     }
 }
 
